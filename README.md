@@ -1,5 +1,7 @@
 # BM Translator - Bahasa Brunei (offline)
 
+Powered by [DarkwizLab.com](https://darkwizlab.com) · live at **https://gemzscreen.github.io/bm-translator/** · current version in `VERSION` (tap the version in the app header for *What's new*).
+
 An app for your phone that translates Malay / Brunei Malay to and from English. It works offline.
 
 | Feature | Offline? |
@@ -44,10 +46,25 @@ The app needs a secure (https) web address before your phone can install it and 
 - In **My words**, use **Download backup** now and then. You can share the backup file with colleagues, and they can import it.
 - **Scanning tip:** get close, keep the text flat, use good light, and choose **Malay only** or **English only** when you know the language. You can correct the text found before translating.
 
-## 4. Updating the app
+## 4. Versions and updates (same system as QS CRM)
 
-- **To add built-in words for everyone:** edit `data.js` (one entry per line: `malay|english|note`, under a `#category` heading).
-- **After changing any file,** open `sw.js` and change `const VERSION = "bm-1.0.0"` to a new number, for example `bm-1.0.1`. Upload the changed files to GitHub. Phones pick up the update the next time they open the app with data (or use **Settings > Check for app update**).
+- `VERSION` is the single source of truth. `version.js` holds `APP.version` and the in-app **CHANGELOG** (shown under *What's new*). `CHANGELOG.md` is generated from it.
+- **To make a change:**
+  1. Run `node scripts/version.mjs bump x.y.z`. This updates `VERSION`, `version.js`, the version buttons and the cache version in `sw.js`.
+  2. Add `{ v:'x.y.z', date:'…', items:[…] }` at the top of `CHANGELOG` in `version.js`.
+  3. Run `node scripts/version.mjs changelog`, then `node scripts/version.mjs check`, then `node test/t_engine.js`.
+- **Update flow:** Claude opens a pull request, the **Check** workflow runs (versions, syntax, security policy, engine and scanner tests), Gemz merges, then GitHub Pages republishes and the **Release** workflow tags `vX.Y.Z` with the changelog notes.
+- Phones pick up the new version the next time the app is opened with data, and *What's new* opens once after the update.
+- **To add built-in words for everyone:** edit `data.js` (one entry per line: `malay|english|note`, under a `#category` heading), then follow the steps above.
+
+## 5. Security
+
+- **No login and no server.** The app is static files. My words, history, favourites and the optional MyMemory email stay in the phone's own storage and are never uploaded.
+- **Content Security Policy:** the page may only run its own scripts and only connect to itself and `api.mymemory.translated.net`. No third-party scripts, CDNs, trackers or ads. The scanner engine (Tesseract.js 5.1.1) is a pinned copy in `ocr/`.
+- **The app won't run inside another website (frame guard),** and it sends no referrer when opening links.
+- **Imported files are checked:** maximum 2 MB, 5,000 entries and 300 characters per field. Everything shown on screen is escaped.
+- **Protect the GitHub account**, because whoever controls the repository controls the app. Turn on two-factor authentication. Optionally, protect `main` so that changes only arrive through pull requests that pass Check.
+- **Lock your phone.** Anyone holding the unlocked phone can see the saved words.
 
 ## Files
 
@@ -56,6 +73,11 @@ index.html            app screens and styles
 app.js                app logic (translate, voice, scan, phrasebook, my words, settings)
 engine.js             offline translation engine (phrase match, glossary, Malay root-word analysis)
 data.js               built-in glossary and phrasebook - edit to add words
+version.js            APP.version + in-app CHANGELOG (What's new)
+VERSION, CHANGELOG.md version source of truth + generated changelog
+scripts/version.mjs   version tool: check | bump | changelog | notes
+test/t_engine.js      engine + scanner clean-up tests
+.github/workflows/    Check (every PR) and Release (tags vX.Y.Z on main)
 sw.js                 offline caching (service worker)
 manifest.webmanifest  install settings (name, icon, colours)
 icons/                app icons

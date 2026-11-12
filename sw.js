@@ -1,12 +1,12 @@
 /* BM Translator service worker - makes the app work without data */
-const VERSION = "bm-1.0.0";
+const VERSION = "bm-1.1.0";
 const SHELL_CACHE = "bm-shell-" + VERSION;
 const OCR_CACHE = "bm-ocr-v5";   // scanner files kept across app updates
-const SHELL = ["./", "index.html", "app.js", "engine.js", "data.js", "manifest.webmanifest",
+const SHELL = ["./", "index.html", "app.js", "engine.js", "data.js", "version.js", "manifest.webmanifest",
   "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(SHELL_CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(SHELL_CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (e) => {

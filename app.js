@@ -1,7 +1,13 @@
 /* BM Translator - app logic */
 (function () {
   "use strict";
-  var VERSION = "1.0.0";
+  // never run inside another website's frame (clickjacking guard)
+  if (window.top !== window.self) {
+    document.documentElement.style.display = "none";
+    try { window.top.location.replace(window.location.href); } catch (e) { /* blocked: stay hidden */ }
+    return;
+  }
+  var VERSION = window.APP.version;
   var $ = function (s, r) { return (r || document).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
   var esc = function (s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); };
@@ -357,56 +363,125 @@
   }
   $("#ocrLang").addEventListener("change", function () { settings.ocrLang = this.value; saveSettings(); });
 
-  function prepImage(file) {
+  /* photo + crop box */
+  var photo = null, sel = null, drag = null, cv = $("#cropCv"), cx = cv.getContext("2d");
+  function loadPhoto(file) {
     return new Promise(function (res, rej) {
+      if (!file || !/^image\//.test(file.type || "image/")) { rej(new Error("Please choose a photo")); return; }
       var url = URL.createObjectURL(file), img = new Image();
       img.onload = function () {
-        var max = 2000, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
-        var c = document.createElement("canvas"); c.width = Math.round(w * k); c.height = Math.round(h * k);
-        var x = c.getContext("2d"); x.drawImage(img, 0, 0, c.width, c.height);
-        try {
-          var d = x.getImageData(0, 0, c.width, c.height), p = d.data, lo = 255, hi = 0, i, g;
-          for (i = 0; i < p.length; i += 4) { g = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]; p[i] = g; if (g < lo) lo = g; if (g > hi) hi = g; }
-          var span = Math.max(1, hi - lo);
-          for (i = 0; i < p.length; i += 4) { g = (p[i] - lo) * 255 / span; p[i] = p[i + 1] = p[i + 2] = g; }
-          x.putImageData(d, 0, 0);
-        } catch (e) { /* keep colour image */ }
-        $("#preview").src = url; $("#preview").style.display = "block";
-        res(c);
+        photo = img; sel = null;
+        var k = Math.min(1, 1100 / Math.max(img.naturalWidth, img.naturalHeight));
+        cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+        drawCrop(); res();
       };
       img.onerror = function () { rej(new Error("Could not open this image")); };
       img.src = url;
     });
   }
-  function runOCR(file) {
-    if (!file) return;
+  function drawCrop() {
+    if (!photo) return;
+    var k = cv.width / photo.naturalWidth;
+    cx.drawImage(photo, 0, 0, cv.width, cv.height);
+    if (sel) {
+      var x = sel.x * k, y = sel.y * k, w = sel.w * k, h = sel.h * k;
+      cx.fillStyle = "rgba(20,28,36,.55)";
+      cx.fillRect(0, 0, cv.width, y); cx.fillRect(0, y + h, cv.width, cv.height - y - h);
+      cx.fillRect(0, y, x, h); cx.fillRect(x + w, y, cv.width - x - w, h);
+      cx.strokeStyle = "#F7E017"; cx.lineWidth = Math.max(2, cv.width / 250); cx.strokeRect(x, y, w, h);
+    }
+    $("#cropClear").classList.toggle("hide", !sel);
+  }
+  function toImg(e) {
+    var r = cv.getBoundingClientRect();
+    return { x: Math.max(0, Math.min(photo.naturalWidth, (e.clientX - r.left) / r.width * photo.naturalWidth)),
+             y: Math.max(0, Math.min(photo.naturalHeight, (e.clientY - r.top) / r.height * photo.naturalHeight)) };
+  }
+  cv.addEventListener("pointerdown", function (e) {
+    if (!photo) return; e.preventDefault(); drag = toImg(e);
+    try { cv.setPointerCapture(e.pointerId); } catch (x) {}
+  });
+  cv.addEventListener("pointermove", function (e) {
+    if (!drag) return; var p = toImg(e);
+    sel = { x: Math.min(drag.x, p.x), y: Math.min(drag.y, p.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y) };
+    drawCrop();
+  });
+  function endDrag() {
+    if (!drag) return; drag = null;
+    if (sel && (sel.w < photo.naturalWidth * 0.03 || sel.h < photo.naturalHeight * 0.02)) sel = null;
+    drawCrop();
+    $("#cropHint").innerHTML = sel ? "Box set. Tap <b>Read text</b> to read only inside it." : "Tip: drag a box around the text, then tap <b>Read text</b>. Everything outside the box is ignored.";
+  }
+  cv.addEventListener("pointerup", endDrag); cv.addEventListener("pointercancel", endDrag);
+  $("#cropClear").addEventListener("click", function () { sel = null; drawCrop(); endDrag(); });
+
+  // the part to read: crop box (or whole photo), sized for the scanner, in grey
+  function regionCanvas() {
+    var r = sel || { x: 0, y: 0, w: photo.naturalWidth, h: photo.naturalHeight };
+    var k = Math.min(2000 / Math.max(r.w, r.h), 2.5);
+    var c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(r.w * k)); c.height = Math.max(1, Math.round(r.h * k));
+    var x = c.getContext("2d");
+    x.imageSmoothingQuality = "high";
+    x.drawImage(photo, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+    try {
+      var d = x.getImageData(0, 0, c.width, c.height), p = d.data;
+      for (var i = 0; i < p.length; i += 4) { var g = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]; p[i] = p[i + 1] = p[i + 2] = g; }
+      x.putImageData(d, 0, 0);
+    } catch (e) { /* keep colour */ }
+    return c;
+  }
+  var busy = false;
+  function runOCR() {
+    if (!photo || busy) return;
+    busy = true; $("#ocrRun").disabled = true;
     var prog = $("#ocrProg"), bar = $("#ocrProg i"), msg = $("#ocrMsg");
-    prog.classList.remove("hide"); bar.style.width = "3%"; msg.textContent = "Preparing image..."; $("#ocrOut").classList.add("hide");
-    var lang = settings.ocrLang;
+    prog.classList.remove("hide"); bar.style.width = "3%"; msg.textContent = "Preparing image...";
+    $("#ocrOut").classList.add("hide"); $("#ocrNone").classList.add("hide");
     var onProg = function (m) {
       var labels = { "loading tesseract core": "Loading scanner", "loading language traineddata": "Loading language data", "initializing api": "Starting", "recognizing text": "Reading text" };
       msg.textContent = (labels[m.status] || m.status) + "..." + (m.status === "recognizing text" ? " " + Math.round(m.progress * 100) + "%" : "");
-      if (m.status === "recognizing text") bar.style.width = (30 + m.progress * 70) + "%";
-      else bar.style.width = Math.max(5, Math.round(m.progress * 30)) + "%";
+      bar.style.width = (m.status === "recognizing text" ? 30 + m.progress * 70 : Math.max(5, Math.round(m.progress * 30))) + "%";
     };
-    prepImage(file).then(function (canvas) {
-      return getWorker(lang, onProg).then(function (w) { return w.recognize(canvas); });
+    var canvas = regionCanvas();
+    getWorker(settings.ocrLang, onProg).then(function (w) {
+      return w.recognize(canvas, {}, { text: true, blocks: true });
     }).then(function (r) {
-      bar.style.width = "100%";
-      var text = (r.data.text || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-      msg.textContent = text ? "" : "No text found. Try a closer, sharper photo with good light.";
-      $("#ocrText").value = text;
-      $("#ocrConf").textContent = text ? "(" + Math.round(r.data.confidence) + "% confidence)" : "";
-      $("#ocrOut").classList.toggle("hide", !text);
-      setTimeout(function () { prog.classList.add("hide"); }, 500);
+      bar.style.width = "100%"; msg.textContent = "";
+      var c = BMEngine.cleanOCR(r.data);
+      $("#rawBox1").textContent = $("#rawBox2").textContent = c.raw || "(nothing)";
+      $("#rawBox1").classList.add("hide"); $("#rawBox2").classList.add("hide");
+      if (!c.text) {
+        $("#ocrNone").classList.remove("hide");
+        $("#rawShow1").classList.toggle("hide", !c.raw);
+        $("#cropHint").innerHTML = "No clear text. Drag a box tightly around the words and tap <b>Read text</b> again.";
+      } else {
+        $("#ocrText").value = c.text;
+        $("#ocrConf").textContent = "(" + c.confidence + "% confidence)";
+        $("#ocrDropped").innerHTML = c.dropped ? 'Ignored ' + c.dropped + ' unclear line' + (c.dropped > 1 ? "s" : "") + ' (<button class="linkbtn" id="rawShow2">show</button>).' : "";
+        $("#ocrOut").classList.remove("hide");
+      }
+      setTimeout(function () { prog.classList.add("hide"); }, 400);
       refreshScanState();
     }).catch(function (e) {
       prog.classList.add("hide");
       msg.innerHTML = '<span style="color:var(--red)">' + esc(e && e.message ? e.message : e) + "</span>";
-    });
+    }).then(function () { busy = false; $("#ocrRun").disabled = false; });
   }
-  $("#camIn").addEventListener("change", function () { runOCR(this.files[0]); this.value = ""; });
-  $("#imgIn").addEventListener("change", function () { runOCR(this.files[0]); this.value = ""; });
+  function pickPhoto(file) {
+    if (!file) return;
+    $("#ocrMsg").textContent = "";
+    loadPhoto(file).then(function () {
+      $("#cropCard").classList.remove("hide");
+      $("#cropHint").innerHTML = "Tip: drag a box around the text, then tap <b>Read text</b>. Everything outside the box is ignored.";
+      runOCR();
+    }).catch(function (e) { toast(e.message || "Could not open this image"); });
+  }
+  $("#camIn").addEventListener("change", function () { pickPhoto(this.files[0]); this.value = ""; });
+  $("#imgIn").addEventListener("change", function () { pickPhoto(this.files[0]); this.value = ""; });
+  $("#ocrRun").addEventListener("click", runOCR);
+  $("#rawShow1").addEventListener("click", function () { $("#rawBox1").classList.toggle("hide"); });
+  $("#ocrOut").addEventListener("click", function (e) { if (e.target.id === "rawShow2") $("#rawBox2").classList.toggle("hide"); });
   function ocrSend(d) {
     var t = $("#ocrText").value.trim(); if (!t) return;
     dir = d; store.set("dir", dir); dirUI(); src.value = t.replace(/\s*\n\s*/g, " "); showView("translate"); doTranslate();
@@ -414,6 +489,7 @@
   $("#ocrToMs").addEventListener("click", function () { ocrSend("ms-en"); });
   $("#ocrToEn").addEventListener("click", function () { ocrSend("en-ms"); });
   $("#ocrCopy").addEventListener("click", function () { copy($("#ocrText").value); });
+  $("#ocrLang").addEventListener("change", function () { if (photo) $("#cropHint").innerHTML = "Language changed. Tap <b>Read text</b> to read again."; });
 
   /* ---------- phrasebook ---------- */
   var pbCat = store.get("pbCat", "phrases"), pbShown = 0, pbItems = [];
@@ -536,24 +612,30 @@
   }
   $("#impIn").addEventListener("change", function () {
     var f = this.files[0]; this.value = ""; if (!f) return;
+    if (f.size > 2 * 1024 * 1024) { toast("File too large (max 2 MB)"); return; }
+    var clip = function (x, n) { return String(x == null ? "" : x).replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, n); };
     f.text().then(function (txt) {
       var incoming = [];
       try {
         var j = JSON.parse(txt);
         var arr = Array.isArray(j) ? j : (j.words || []);
-        arr.forEach(function (w) { if (w && w.ms && w.en) incoming.push({ ms: String(w.ms), en: String(w.en), note: String(w.note || ""), cat: w.cat || "gen" }); });
-        if (j.favourites) j.favourites.forEach(function (k) { fav.add(k); });
+        if (!Array.isArray(arr)) arr = [];
+        arr.slice(0, 5000).forEach(function (w) {
+          if (w && typeof w === "object" && w.ms && w.en) incoming.push({ ms: clip(w.ms, 300), en: clip(w.en, 300), note: clip(w.note, 300), cat: (typeof w.cat === "string" && CATS[w.cat]) ? w.cat : "gen" });
+        });
+        if (Array.isArray(j.favourites)) j.favourites.slice(0, 5000).forEach(function (k) { if (typeof k === "string" && k.length < 700) fav.add(k); });
         store.set("fav", Array.from(fav));
       } catch (e) {
         txt.split(/\r?\n/).forEach(function (line, i) {
           if (!line.trim()) return;
           var f2 = parseCSVLine(line);
           if (i === 0 && /^malay$/i.test(f2[0])) return;
-          if (f2[0] && f2[1]) incoming.push({ ms: f2[0], en: f2[1], note: f2[2] || "", cat: (f2[3] && CATS[f2[3]]) ? f2[3] : "gen" });
+          if (i < 5000 && f2[0] && f2[1]) incoming.push({ ms: clip(f2[0], 300), en: clip(f2[1], 300), note: clip(f2[2], 300), cat: (f2[3] && CATS[f2[3]]) ? f2[3] : "gen" });
         });
       }
       var have = new Set(mine.map(function (m) { return BMEngine.norm(m.ms) + "|" + BMEngine.norm(m.en); })), added = 0;
       incoming.forEach(function (w) {
+        if (mine.length >= 10000 || !w.ms || !w.en) return;
         var k = BMEngine.norm(w.ms) + "|" + BMEngine.norm(w.en); if (have.has(k)) return; have.add(k);
         w.id = "w" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); w.ts = Date.now(); mine.push(w); added++;
       });
@@ -573,7 +655,7 @@
   function refreshSettings() {
     fillVoices();
     $("#rate").value = settings.rate; $("#rateV").textContent = settings.rate + "x";
-    $("#mmEmail").value = settings.mmEmail || "";
+    $("#mmEmail").value = settings.mmEmail || ""; mmUI();
     var sw = ("serviceWorker" in navigator) && navigator.serviceWorker.controller;
     scannerCached().then(function (ok) {
       $("#offStatus").innerHTML =
@@ -588,7 +670,22 @@
   $("#voiceSel").addEventListener("change", function () { settings.voiceURI = this.value; saveSettings(); });
   $("#rate").addEventListener("input", function () { settings.rate = +this.value; $("#rateV").textContent = settings.rate + "x"; saveSettings(); });
   $("#testVoice").addEventListener("click", function () { speak("Selamat pagi. Tolong hantar sebut harga ke pejabat kami.", "ms"); });
-  $("#mmEmail").addEventListener("change", function () { settings.mmEmail = this.value.trim(); saveSettings(); });
+  var EMAIL_RE = /^[^\s@<>"'`]{1,64}@[A-Za-z0-9.-]{1,180}\.[A-Za-z]{2,24}$/;
+  function mmUI() {
+    var e = settings.mmEmail || "";
+    $("#mmStatus").innerHTML = e ? '<span class="ok-line">&#10003; Saved on this phone:</span> ' + esc(e) + "<br>Sent only to MyMemory to raise your free daily limit."
+      : "Not set - online translation uses the free anonymous limit.";
+    $("#mmRemove").classList.toggle("hide", !e);
+  }
+  $("#mmSave").addEventListener("click", function () {
+    var v = $("#mmEmail").value.trim();
+    if (!v) { settings.mmEmail = ""; saveSettings(); mmUI(); toast("Email removed"); return; }
+    if (v.length > 120 || !EMAIL_RE.test(v)) { toast("That doesn't look like an email address"); $("#mmEmail").focus(); return; }
+    settings.mmEmail = v; var ok = store.set("settings", settings); mmUI();
+    toast(ok ? "Email saved" : "Could not save - storage is blocked on this browser");
+  });
+  $("#mmEmail").addEventListener("keydown", function (e) { if (e.key === "Enter") $("#mmSave").click(); });
+  $("#mmRemove").addEventListener("click", function () { settings.mmEmail = ""; $("#mmEmail").value = ""; saveSettings(); mmUI(); toast("Email removed"); });
   $("#clrHist").addEventListener("click", function () { hist = []; store.set("hist", hist); renderHist(); toast("Cleared"); });
   $("#dlScanner").addEventListener("click", function () {
     if (!navigator.onLine) { toast("Connect to Wi-Fi or data first"); return; }
@@ -621,7 +718,26 @@
   }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});
 
+  /* ---------- version / what's new ---------- */
+  function showVersions() {
+    $("#verList").innerHTML = '<div class="vers">' + window.CHANGELOG.map(function (e) {
+      return "<h3>v" + esc(e.v) + " <span>&middot; " + esc(e.date) + "</span></h3><ul>" + e.items.map(function (t) { return "<li>" + esc(t) + "</li>"; }).join("") + "</ul>";
+    }).join("") + "</div>";
+    $("#verModal").classList.remove("hide");
+  }
+  function hideVersions() { $("#verModal").classList.add("hide"); }
+  $("#btnVer").addEventListener("click", showVersions);
+  $("#brandVer").addEventListener("click", showVersions);
+  $("#verClose").addEventListener("click", hideVersions);
+  $("#verModal").addEventListener("click", function (e) { if (e.target.id === "verModal") hideVersions(); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") hideVersions(); });
+  // after an update, show what changed once
+  var seen = store.get("seenVersion", "");
+  if (seen && seen !== VERSION) setTimeout(function () { showVersions(); }, 600);
+  store.set("seenVersion", VERSION);
+
   /* ---------- start ---------- */
+  $("#btnVer").textContent = "v" + VERSION; $("#brandVer").textContent = "v" + VERSION;
   $("#ver").textContent = VERSION;
   $("#glossCount").textContent = builtIn.length;
   dirUI(); netUI(); renderHist();
