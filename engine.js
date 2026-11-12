@@ -318,7 +318,46 @@
     return scored.map(function (x) { return x.e; });
   };
 
-  var api = { Engine: Engine, parse: parse, norm: norm, firstAlt: firstAlt };
+  /* Scanner clean-up: keep only lines that look like real text.
+     Photos of objects, logos and textured backgrounds make the scanner "see" random symbols;
+     those come back with low confidence or without real words, and are dropped here. */
+  function wordLike(t) {
+    var letters = (t.match(/[A-Za-z\u00C0-\u024F]/g) || []).length;
+    var digits = (t.match(/[0-9]/g) || []).length;
+    var core = t.replace(/^[^A-Za-z0-9\u00C0-\u024F]+|[^A-Za-z0-9\u00C0-\u024F]+$/g, "");
+    if (!core) return false;
+    if (letters >= 2 && letters / core.length >= 0.6) return true;
+    return digits >= 3 && (digits + letters) / core.length >= 0.7;
+  }
+  function cleanOCR(data, opts) {
+    opts = opts || {};
+    var minLine = opts.minLine || 60, minWord = opts.minWord || 70, keepWord = opts.keepWord || 45;
+    var kept = [], dropped = [], confs = [];
+    var lines = [];
+    (data.blocks || []).forEach(function (b) { (b.paragraphs || []).forEach(function (p) { (p.lines || []).forEach(function (l) { lines.push(l); }); }); });
+    if (!lines.length && data.text) {
+      // no layout info: fall back to overall confidence
+      var ok = (data.confidence || 0) >= minLine;
+      return { text: ok ? String(data.text).trim() : "", confidence: ok ? Math.round(data.confidence) : 0,
+               kept: ok ? 1 : 0, dropped: ok ? 0 : 1, raw: String(data.text || "").trim() };
+    }
+    lines.forEach(function (l) {
+      var words = (l.words || []).filter(function (w) { return String(w.text || "").trim(); });
+      var strong = words.filter(function (w) { return w.confidence >= minWord && wordLike(w.text); });
+      var raw = String(l.text || words.map(function (w) { return w.text; }).join(" ")).trim();
+      if (l.confidence >= minLine && strong.length) {
+        var out = words.filter(function (w) { return w.confidence >= keepWord && /[A-Za-z0-9\u00C0-\u024F]/.test(w.text); })
+          .map(function (w) { return w.text; }).join(" ");
+        if (out) { kept.push(out); confs.push(l.confidence); return; }
+      }
+      if (raw) dropped.push(raw);
+    });
+    var avg = confs.length ? Math.round(confs.reduce(function (a, b) { return a + b; }, 0) / confs.length) : 0;
+    return { text: kept.join("\n"), confidence: avg, kept: kept.length, dropped: dropped.length,
+             raw: lines.map(function (l) { return String(l.text || "").trim(); }).filter(Boolean).join("\n") };
+  }
+
+  var api = { Engine: Engine, parse: parse, norm: norm, firstAlt: firstAlt, cleanOCR: cleanOCR, wordLike: wordLike };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BMEngine = api;
 })(this);

@@ -1,0 +1,35 @@
+# Runs on every pull request (and push to main): version numbers agree, changelog current, JavaScript parses,
+# engine + scanner tests pass, and an app change must come with a new VERSION.
+name: Check
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Versions, changelog, syntax, security policy
+        run: node scripts/version.mjs check
+      - name: Engine + scanner tests
+        run: node test/t_engine.js
+      - name: App change needs a new version
+        if: github.event_name == 'pull_request'
+        run: |
+          V=$(cat VERSION | tr -d '[:space:]')
+          git fetch --tags --quiet
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- index.html app.js engine.js data.js version.js sw.js manifest.webmanifest ocr/ icons/ || true)
+          if [ -n "$CHANGED" ] && git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "::error::These files changed but v$V is already released: $CHANGED"
+            echo "Run: node scripts/version.mjs bump x.y.z, add the CHANGELOG entry in version.js, then node scripts/version.mjs changelog"
+            exit 1
+          fi
+          echo "OK (v$V)"
